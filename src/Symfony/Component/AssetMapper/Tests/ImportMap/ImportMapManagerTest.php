@@ -15,6 +15,7 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\AssetMapper\AssetMapperInterface;
+use Symfony\Component\AssetMapper\Exception\PackageNotFoundException;
 use Symfony\Component\AssetMapper\ImportMap\ImportMapConfigReader;
 use Symfony\Component\AssetMapper\ImportMap\ImportMapEntries;
 use Symfony\Component\AssetMapper\ImportMap\ImportMapEntry;
@@ -396,6 +397,50 @@ class ImportMapManagerTest extends TestCase
         $manager->update();
     }
 
+    public function testUpdateContinuesWhenOnePackagePathNotFound()
+    {
+        $this->packageResolver = $this->createMock(PackageResolverInterface::class);
+        $this->remotePackageDownloader = $this->createMock(RemotePackageDownloader::class);
+        $manager = $this->createImportMapManager();
+
+        $this->mockImportMap([
+            self::createRemoteEntry('lodash', version: '1.2.3', packageSpecifier: 'lodash'),
+            self::createRemoteEntry('sortable-tablesort/sortable.min.css', version: '2.0.0', packageSpecifier: 'sortable-tablesort/sortable.min.css'),
+        ]);
+
+        $this->packageResolver->expects($this->once())
+            ->method('resolvePackages')
+            ->willThrowException(new PackageNotFoundException(
+                ['sortable-tablesort/sortable.min.css'],
+                [self::resolvedPackage('lodash', '1.2.9')],
+                'Error 404 requiring packages from jsDelivr for "sortable-tablesort/sortable.min.css".',
+            ));
+
+        $this->remotePackageDownloader->expects($this->once())
+            ->method('downloadPackages');
+
+        $this->configReader->expects($this->once())
+            ->method('writeEntries')
+            ->with($this->callback(function (ImportMapEntries $entries) {
+                $this->assertCount(2, $entries);
+                $this->assertTrue($entries->has('lodash'));
+                $this->assertTrue($entries->has('sortable-tablesort/sortable.min.css'));
+
+                $this->assertSame('1.2.9', $entries->get('lodash')->version);
+                $this->assertSame('2.0.0', $entries->get('sortable-tablesort/sortable.min.css')->version);
+
+                return true;
+            }));
+
+        $updatedEntries = $manager->update();
+
+        $this->assertCount(1, $updatedEntries);
+        $this->assertSame('lodash', $updatedEntries[0]->importName);
+
+        $warnings = $manager->getLastUpdateWarnings();
+        $this->assertSame(['sortable-tablesort/sortable.min.css'], $warnings);
+    }
+
     private function createImportMapManager(): ImportMapManager
     {
         $this->assetMapper = $this->createStub(AssetMapperInterface::class);
@@ -403,7 +448,6 @@ class ImportMapManagerTest extends TestCase
         $this->packageResolver ??= $this->createStub(PackageResolverInterface::class);
         $this->remotePackageDownloader ??= $this->createStub(RemotePackageDownloader::class);
 
-        // mock this to behave like normal
         $this->configReader
             ->method('createRemoteEntry')
             ->willReturnCallback(function (string $importName, ImportMapType $type, string $version, string $packageModuleSpecifier, bool $isEntrypoint) {

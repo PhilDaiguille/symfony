@@ -12,6 +12,7 @@
 namespace Symfony\Component\AssetMapper\ImportMap\Resolver;
 
 use Symfony\Component\AssetMapper\Compiler\CssAssetUrlCompiler;
+use Symfony\Component\AssetMapper\Exception\PackageNotFoundException;
 use Symfony\Component\AssetMapper\Exception\RuntimeException;
 use Symfony\Component\AssetMapper\ImportMap\BatchHttpClient;
 use Symfony\Component\AssetMapper\ImportMap\ImportMapEntry;
@@ -113,16 +114,40 @@ final class JsDelivrEsmResolver implements PackageResolverInterface
             $type = str_starts_with($contentType, 'text/css') ? ImportMapType::CSS : ImportMapType::JS;
             $resolvedPackages[$options->packageModuleSpecifier] = new ResolvedImportMapPackage($options, $version, $type);
 
-            $packagesToRequire = array_merge($packagesToRequire, $this->fetchPackageRequirementsFromImports($response->getContent()));
+            array_push($packagesToRequire, ...$this->fetchPackageRequirementsFromImports($response->getContent()));
+        }
+
+        $notFoundPackageNames = [];
+        $otherContentErrors = [];
+        foreach ($getContentErrors as [$pkg, $response]) {
+            if (404 === $response->getStatusCode()) {
+                $notFoundPackageNames[] = $pkg;
+            } else {
+                $otherContentErrors[] = [$pkg, $response];
+            }
         }
 
         try {
-            ($getContentErrors[0][1] ?? null)?->getHeaders();
+            ($otherContentErrors[0][1] ?? null)?->getHeaders();
         } catch (HttpExceptionInterface $e) {
             $response = $e->getResponse();
-            $packages = implode('", "', array_column($getContentErrors, 0));
+            $packages = implode('", "', array_column($otherContentErrors, 0));
 
             throw new RuntimeException(\sprintf('Error %d requiring packages from jsDelivr for "%s". Check your package names. Response: ', $response->getStatusCode(), $packages).$response->getContent(false), 0, $e);
+        }
+
+        if ($notFoundPackageNames) {
+            $packages = implode('", "', $notFoundPackageNames);
+            $hint = implode(' ', array_map(
+                static fn (string $pkg): string => \sprintf('Run "importmap:remove %s" then "importmap:require" with the correct path.', $pkg),
+                $notFoundPackageNames
+            ));
+
+            throw new PackageNotFoundException(
+                $notFoundPackageNames,
+                array_values($resolvedPackages),
+                \sprintf('Error 404 requiring packages from jsDelivr for "%s". Check your package names or path. %s', $packages, $hint),
+            );
         }
 
         // process any pending CSS entrypoints

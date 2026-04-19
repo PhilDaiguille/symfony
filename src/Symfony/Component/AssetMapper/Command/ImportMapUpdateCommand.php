@@ -63,6 +63,15 @@ final class ImportMapUpdateCommand extends Command
 
         $this->renderVersionProblems($this->importMapVersionChecker, $output);
 
+        foreach ($this->importMapManager->getLastUpdateWarnings() as $failedPackage) {
+            $io->warning(\sprintf(
+                'Could not update "%s": the path no longer exists in this package version. The package has been kept at its current version.'."\n"
+                .'To fix this, remove it with "importmap:remove %s" and add it back with "importmap:require" using the correct path.',
+                $failedPackage,
+                $failedPackage,
+            ));
+        }
+
         if (0 < \count($packages)) {
             $io->success(\sprintf(
                 'Updated %s package%s in importmap.php.',

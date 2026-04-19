@@ -12,6 +12,7 @@
 namespace Symfony\Component\AssetMapper\ImportMap;
 
 use Symfony\Component\AssetMapper\AssetMapperInterface;
+use Symfony\Component\AssetMapper\Exception\PackageNotFoundException;
 use Symfony\Component\AssetMapper\ImportMap\Resolver\PackageResolverInterface;
 use Symfony\Component\AssetMapper\MappedAsset;
 
@@ -30,6 +31,9 @@ class ImportMapManager
         private readonly PackageResolverInterface $resolver,
     ) {
     }
+
+    /** @var string[] */
+    private array $lastUpdateWarnings = [];
 
     /**
      * Adds or updates packages.
@@ -54,12 +58,27 @@ class ImportMapManager
     }
 
     /**
+     * Returns warnings generated during the last call to update().
+     *
+     * Each entry is a package specifier that could not be updated (e.g. because
+     * the path no longer exists on jsDelivr).
+     *
+     * @return string[]
+     */
+    public function getLastUpdateWarnings(): array
+    {
+        return $this->lastUpdateWarnings;
+    }
+
+    /**
      * Updates either all existing packages or the specified ones to the latest version.
      *
      * @return ImportMapEntry[]
      */
     public function update(array $packages = []): array
     {
+        $this->lastUpdateWarnings = [];
+
         return $this->updateImportMapConfig(true, [], [], $packages);
     }
 
@@ -101,12 +120,15 @@ class ImportMapManager
             $currentEntries->remove($packageName);
         }
 
+        $originalEntriesForUpdate = [];
         if ($update) {
             foreach ($currentEntries as $entry) {
                 $importName = $entry->importName;
                 if (!$entry->isRemotePackage() || ($packagesToUpdate && !\in_array($importName, $packagesToUpdate, true))) {
                     continue;
                 }
+
+                $originalEntriesForUpdate[$entry->packageModuleSpecifier] = $entry;
 
                 $packagesToRequire[] = new PackageRequireOptions(
                     $entry->packageModuleSpecifier,
@@ -122,7 +144,35 @@ class ImportMapManager
             }
         }
 
-        $newEntries = $this->requirePackages($packagesToRequire, $currentEntries);
+        $newEntries = [];
+        try {
+            $newEntries = $this->requirePackages($packagesToRequire, $currentEntries);
+        } catch (PackageNotFoundException $e) {
+            if (!$update) {
+                throw $e;
+            }
+
+            foreach ($e->getResolvedPackages() as $resolvedPackage) {
+                $newEntry = $this->importMapConfigReader->createRemoteEntry(
+                    $resolvedPackage->requireOptions->importName,
+                    $resolvedPackage->type,
+                    $resolvedPackage->version,
+                    $resolvedPackage->requireOptions->packageModuleSpecifier,
+                    $resolvedPackage->requireOptions->entrypoint,
+                );
+                $currentEntries->add($newEntry);
+                $newEntries[] = $newEntry;
+            }
+
+            foreach ($e->getPackageNames() as $failedPkg) {
+                if (isset($originalEntriesForUpdate[$failedPkg])) {
+                    $currentEntries->add($originalEntriesForUpdate[$failedPkg]);
+                }
+            }
+
+            $this->lastUpdateWarnings = $e->getPackageNames();
+        }
+
         $this->importMapConfigReader->writeEntries($currentEntries);
         $this->packageDownloader->downloadPackages();
 

@@ -13,6 +13,7 @@ namespace Symfony\Component\AssetMapper\Tests\ImportMap\Resolver;
 
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use Symfony\Component\AssetMapper\Exception\PackageNotFoundException;
 use Symfony\Component\AssetMapper\ImportMap\ImportMapEntry;
 use Symfony\Component\AssetMapper\ImportMap\ImportMapType;
 use Symfony\Component\AssetMapper\ImportMap\PackageRequireOptions;
@@ -52,6 +53,33 @@ class JsDelivrEsmResolverTest extends TestCase
         }
 
         $this->assertSame(\count($expectedRequests), $httpClient->getRequestsCount());
+    }
+
+    public function testResolvePackagesThrowsPackageNotFoundExceptionForMovedPath()
+    {
+        $responses = [
+            new MockResponse(json_encode(['version' => '1.2.3'])),
+            new MockResponse(json_encode(['version' => '2.0.0'])),
+            new MockResponse('const lodash = {};'),
+            new MockResponse(json_encode(['entrypoints' => []])),
+            new MockResponse('Couldn\'t find the requested file /sortable.min.css in sortable-tablesort', ['http_code' => 404]),
+        ];
+
+        $httpClient = new MockHttpClient($responses);
+        $resolver = new JsDelivrEsmResolver($httpClient);
+
+        try {
+            $resolver->resolvePackages([
+                new PackageRequireOptions('lodash'),
+                new PackageRequireOptions('sortable-tablesort/sortable.min.css'),
+            ]);
+            $this->fail('Expected PackageNotFoundException was not thrown');
+        } catch (PackageNotFoundException $e) {
+            $this->assertSame(['sortable-tablesort/sortable.min.css'], $e->getPackageNames());
+            $this->assertCount(1, $e->getResolvedPackages());
+            $this->assertSame('lodash', $e->getResolvedPackages()[0]->requireOptions->packageModuleSpecifier);
+            $this->assertStringContainsString('importmap:remove', $e->getMessage());
+        }
     }
 
     public static function provideResolvePackagesTests(): iterable
